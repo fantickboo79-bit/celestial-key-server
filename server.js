@@ -150,7 +150,12 @@ app.get("/getkey", async (req, res) => {
   }
 });
 
-app.get("/", (req, res) => res.json({status:"ok"}));
+app.get("/", (req, res) => res.json({
+  status: "ok",
+  hasBinId: !!process.env.BIN_ID,
+  hasApiKey: !!process.env.JSONBIN_KEY,
+  binId: process.env.BIN_ID ? process.env.BIN_ID.substring(0,8)+"..." : "MISSING"
+}));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Running on port ${PORT}`));
