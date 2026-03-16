@@ -8,7 +8,7 @@ async function loadDB() {
   const r = await fetch(BIN_URL, { headers: { "X-Master-Key": API_KEY } });
   const j = await r.json();
   return j.record || { keys: {}, nonces: {} };
-}
+} 
 
 async function saveDB(db) {
   await fetch(BIN_UPDATE, {
