@@ -9,7 +9,7 @@ const API_KEY    = process.env.JSONBIN_KEY;
 function randStr(len) {
   const c = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
   let r = "";
-  for (let i = 0; i < len; i++) r += c[Math.floor(Math.random()*c.length)];
+  for (let i = 0; i < len; i++) r += c[Math.floor(Math.random()*c.length)]; 
   return r;
 }
 
