@@ -1,14 +1,11 @@
-
-// Celestial Hub — Key Server (Vercel)
+// Celestial Hub — Key Server (Vercel + JSONBin)
 // api/key.js
 
-const KEY_DURATION_MS   = 6 * 60 * 60 * 1000;   // 6 часов
-const NONCE_DURATION_MS = 15 * 60 * 1000;         // nonce живёт 15 минут
-
-// In-memory хранилище (Vercel serverless — используем глобальные переменные)
-// Для продакшена лучше использовать Vercel KV, но для начала это работает
-if (!global._keys)   global._keys   = {};  // { key: {user, expires, hwid} }
-if (!global._nonces) global._nonces = {};  // { nonce: {key, expires, used} }
+const KEY_DURATION_MS   = 6 * 60 * 60 * 1000;
+const NONCE_DURATION_MS = 15 * 60 * 1000;
+const BIN_URL = "https://api.jsonbin.io/v3/b/" + process.env.BIN_ID + "/latest";
+const BIN_UPDATE = "https://api.jsonbin.io/v3/b/" + process.env.BIN_ID;
+const API_KEY = process.env.JSONBIN_KEY;
 
 function randStr(len) {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
@@ -21,16 +18,29 @@ function generateKey() {
   return "CEL-" + randStr(4) + "-" + randStr(4) + "-" + randStr(4);
 }
 
-function cleanExpired() {
-  const now = Date.now();
-  for (const k in global._keys)   if (global._keys[k].expires   < now) delete global._keys[k];
-  for (const n in global._nonces) if (global._nonces[n].expires < now) delete global._nonces[n];
+async function loadDB() {
+  const r = await fetch(BIN_URL, { headers: { "X-Master-Key": API_KEY } });
+  const j = await r.json();
+  return j.record || { keys: {}, nonces: {} };
 }
 
-function html(title, body, color = "#e0e0ff") {
+async function saveDB(db) {
+  await fetch(BIN_UPDATE, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "X-Master-Key": API_KEY },
+    body: JSON.stringify(db)
+  });
+}
+
+function cleanExpired(db) {
+  const now = Date.now();
+  for (const k in db.keys)   if (db.keys[k].expires   < now) delete db.keys[k];
+  for (const n in db.nonces) if (db.nonces[n].expires < now) delete db.nonces[n];
+}
+
+function pageHTML(title, body, color = "#e0e0ff") {
   return `<!DOCTYPE html><html><head><title>Celestial Hub</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
+<style>*{margin:0;padding:0;box-sizing:border-box}
 body{background:#07070f;color:#fff;font-family:'Segoe UI',sans-serif;
 display:flex;align-items:center;justify-content:center;
 min-height:100vh;flex-direction:column;gap:18px;padding:20px}
@@ -54,91 +64,98 @@ ${body}
 </div></body></html>`;
 }
 
-function outdated(res) {
-  res.setHeader("Content-Type", "text/html");
-  return res.send(html(
-    "Outdated link!",
-    `<p class="warn">This page has already been viewed or the link expired.</p>
-     <p class="sub" style="margin-top:12px">Press <b>Get Key</b> in the loader to get a fresh link.</p>`,
-    "#e05555"
-  ));
-}
-
-export default function handler(req, res) {
+export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   const { action, user, n, key, hwid } = req.query;
-  cleanExpired();
 
-  // ── getkey ──────────────────────────────────────────
-  if (action === "getkey") {
-    const safeUser = (user || "unknown").substring(0, 40);
-
-    // С nonce — обновление страницы
-    if (n) {
-      const entry = global._nonces[n];
-      if (!entry || entry.expires < Date.now() || entry.used) {
-        return outdated(res);
+  // ── verify — всегда JSON ──────────────────────────
+  if (action === "verify") {
+    try {
+      const db = await loadDB();
+      cleanExpired(db);
+      const now = Date.now();
+      const entry = db.keys[key];
+      if (!entry || entry.expires < now) {
+        return res.json({ valid: false, user: "", expires: 0, hwidMismatch: false });
       }
-      // Сжигаем
-      entry.used = true;
-      const keyEntry = global._keys[entry.key];
-      const expStr = keyEntry ? new Date(keyEntry.expires).toUTCString() : "unknown";
-      res.setHeader("Content-Type", "text/html");
-      return res.send(html(
-        "Your key is ready!",
-        `<div class="key">${entry.key}</div>
-         <button class="copy" onclick="navigator.clipboard.writeText('${entry.key}');
-         this.textContent='Copied!';this.style.borderColor='#55e080';this.style.color='#55e080'">Copy Key</button>
-         <p class="sub">Valid for <b>6 hours</b> &nbsp;·&nbsp; Expires: ${expStr}</p>
-         <p class="sub" style="margin-top:6px">Paste into the Celestial Hub loader</p>`,
-        "#55e080"
-      ));
+      let valid = false, hwidMismatch = false;
+      if (!entry.hwid || entry.hwid === "") {
+        entry.hwid = hwid;
+        valid = true;
+        await saveDB(db);
+      } else if (entry.hwid === hwid) {
+        valid = true;
+      } else {
+        hwidMismatch = true;
+      }
+      return res.json({ valid, user: entry.user, expires: entry.expires, hwidMismatch });
+    } catch(e) {
+      return res.json({ valid: false, error: e.message });
     }
-
-    // Первый заход — генерируем ключ + nonce
-    const newKey = generateKey();
-    const keyExpires = Date.now() + KEY_DURATION_MS;
-    global._keys[newKey] = { user: safeUser, expires: keyExpires, hwid: "" };
-
-    const nonce = randStr(48);
-    global._nonces[nonce] = { key: newKey, expires: Date.now() + NONCE_DURATION_MS, used: false };
-
-    const expStr = new Date(keyExpires).toUTCString();
-    const refreshUrl = `${req.headers["x-forwarded-proto"] || "https"}://${req.headers.host}/api/key?action=getkey&user=${encodeURIComponent(safeUser)}&n=${nonce}`;
-
-    res.setHeader("Content-Type", "text/html");
-    return res.send(html(
-      "Your key is ready!",
-      `<div class="key">${newKey}</div>
-       <button class="copy" onclick="navigator.clipboard.writeText('${newKey}');
-       this.textContent='Copied!';this.style.borderColor='#55e080';this.style.color='#55e080'">Copy Key</button>
-       <p class="sub">Valid for <b>6 hours</b> &nbsp;·&nbsp; Expires: ${expStr}</p>
-       <p class="sub" style="margin-top:6px">Paste into the Celestial Hub loader</p>
-       <script>try{history.replaceState(null,'','${refreshUrl}');}catch(e){}</script>`,
-      "#55e080"
-    ));
   }
 
-  // ── verify ──────────────────────────────────────────
-  if (action === "verify") {
-    const entry = global._keys[key];
-    const now = Date.now();
+  // ── getkey — HTML страница ────────────────────────
+  if (action === "getkey") {
+    const safeUser = (user || "unknown").substring(0, 40);
+    res.setHeader("Content-Type", "text/html");
 
-    if (!entry || entry.expires < now) {
-      return res.json({ valid: false, user: "", expires: 0, hwidMismatch: false });
+    try {
+      const db = await loadDB();
+      cleanExpired(db);
+
+      // С nonce — обновление страницы = Outdated
+      if (n) {
+        const entry = db.nonces[n];
+        if (!entry || entry.expires < Date.now() || entry.used) {
+          return res.send(pageHTML(
+            "Outdated link!",
+            `<p class="warn">This page has already been viewed or the link expired.</p>
+             <p class="sub" style="margin-top:12px">Press <b>Get Key</b> in the loader for a new link.</p>`,
+            "#e05555"
+          ));
+        }
+        entry.used = true;
+        const keyEntry = db.keys[entry.key];
+        const expStr = keyEntry ? new Date(keyEntry.expires).toUTCString() : "6 hours";
+        await saveDB(db);
+        return res.send(pageHTML(
+          "Your key is ready!",
+          `<div class="key">${entry.key}</div>
+           <button class="copy" onclick="navigator.clipboard.writeText('${entry.key}');
+           this.textContent='Copied!';this.style.borderColor='#55e080';this.style.color='#55e080'">Copy Key</button>
+           <p class="sub">Valid for <b>6 hours</b> &nbsp;·&nbsp; Expires: ${expStr}</p>
+           <p class="sub" style="margin-top:6px">Paste into the Celestial Hub loader</p>`,
+          "#55e080"
+        ));
+      }
+
+      // Первый заход — генерируем ключ + nonce
+      const newKey = generateKey();
+      const keyExpires = Date.now() + KEY_DURATION_MS;
+      db.keys[newKey] = { user: safeUser, expires: keyExpires, hwid: "" };
+
+      const nonce = randStr(48);
+      db.nonces[nonce] = { key: newKey, expires: Date.now() + NONCE_DURATION_MS, used: false };
+      await saveDB(db);
+
+      const expStr = new Date(keyExpires).toUTCString();
+      const proto = req.headers["x-forwarded-proto"] || "https";
+      const host = req.headers.host;
+      const refreshUrl = `${proto}://${host}/api/key?action=getkey&user=${encodeURIComponent(safeUser)}&n=${nonce}`;
+
+      return res.send(pageHTML(
+        "Your key is ready!",
+        `<div class="key">${newKey}</div>
+         <button class="copy" onclick="navigator.clipboard.writeText('${newKey}');
+         this.textContent='Copied!';this.style.borderColor='#55e080';this.style.color='#55e080'">Copy Key</button>
+         <p class="sub">Valid for <b>6 hours</b> &nbsp;·&nbsp; Expires: ${expStr}</p>
+         <p class="sub" style="margin-top:6px">Paste into the Celestial Hub loader</p>
+         <script>try{history.replaceState(null,'','${refreshUrl}');}catch(e){}</script>`,
+        "#55e080"
+      ));
+    } catch(e) {
+      return res.send(pageHTML("Error", `<p class="warn">${e.message}</p>`, "#e05555"));
     }
-
-    let valid = false, hwidMismatch = false;
-    if (!entry.hwid || entry.hwid === "0" || entry.hwid === "") {
-      entry.hwid = hwid;
-      valid = true;
-    } else if (entry.hwid === hwid) {
-      valid = true;
-    } else {
-      hwidMismatch = true;
-    }
-
-    return res.json({ valid, user: entry.user, expires: entry.expires, hwidMismatch });
   }
 
   return res.json({ error: "Unknown action" });
